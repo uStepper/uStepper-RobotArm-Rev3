@@ -160,7 +160,7 @@ void master()//Code running on Master
         endmove = place;//set the endmove to the current position
         place = 0;//reset array counter
         record = 0;//reset record flag
-        stopped = 0;/reset stopped flag
+        stopped = 0;//reset stopped flag
       }
       play = 0;//reset play sequence flag
       if(stopped == 0)//if stop flag is 0
