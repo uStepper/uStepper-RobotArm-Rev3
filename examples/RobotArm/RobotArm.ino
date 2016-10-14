@@ -186,7 +186,7 @@ void master()//Code running on Master
 
 void slave()//Slave function - the functionality is pretty much the same as in the Master, so look at the comments there for reference.
 {
-  while(stepper.getMotorState());//if stepper is running
+  while(stepper.getMotorState())//if stepper is running
   {
     digitalWrite(2,LOW);//set pin 2 low
   }
