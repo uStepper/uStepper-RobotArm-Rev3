@@ -9,14 +9,15 @@
 * The pin configuration can be changed as desired (pin 6 and 7 is used for i2c though, so don't use these)
 * 
 * Pin connections:
-* -------------------------------------
-* |   Master  |         Slave          |
-* |------------------------------------|
-* | 5         |  0 (RX on both slaves) |
-* | 3         |  2 (slave 1)           |
-* | 8         |  2 (slave 2)           |
-* | GND       |  GND                   |
-* -------------------------------------
+* ---------------------------------------
+* |   Master    |         Slave          |
+* |--------------------------------------|
+* | 5           |  0 (RX on both slaves) |
+* | 3           |  2 (slave 1)           |
+* | 8           |  2 (slave 2)           |
+* | A0 -> Servo |                        |
+* | GND         |  GND                   |
+* ---------------------------------------
 *
 * The master will receive commands on what to do from its UART. It will then transmit the necessary commands to the Slaves through the software serial port on pin 4.
 * The slaves will perform their operation and respond with a digital signal from their pin 2, which is received on pin 3 or 8 on the Master (depending on which slave responds).
@@ -26,6 +27,8 @@
 *  R  ->   Record position
 *  P  ->   Play recorded sequence
 *  S  ->   Stop
+*  Q  ->   Gripper close
+*  X  ->   Gripper open
 * 
 * To record a sequence, press R. At every desired recording position, press R again. The code will record the position at each instant where R is pressed. To stop recording press S. To play the sequence, press P.
 * The sequence can be run again by pressing P, and a new sequence can be recorded by pressing R.
@@ -39,35 +42,44 @@
 
 #include <uStepper.h>
 #include <SoftwareSerial.h>
-
+#define SLAVEOUT 2
 SoftwareSerial mySerial(4, 5); // RX, TX
 
 //acceleration and velocity can be changed to fit your needs
-#define MAXACCELERATION 1500         //Max acceleration = 1500 Steps/s^2
-#define MAXVELOCITY 800           //Max velocity = 1100 steps/s
+#define MAXACCELERATION 1800         //Max acceleration = 1500 Steps/s^2
+#define MAXVELOCITY 1200           //Max velocity = 1100 steps/s
 
 uint8_t record = 0, play = 0, stopped = 0;
+uint8_t servoAngle = 160;//init servo angle
 uint16_t place = 0, endmove = 0;
 int16_t pos[100];//Array for storing the positions recorded
+uint8_t servoPos[100] = {200};//Array for storing the positions recorded - init to 200
 bool finalMove = 0;
   
 uStepper stepper(MAXACCELERATION, MAXVELOCITY);//Setup uStepper with the parameters defined
+uStepperServo servo; //Setup a servo
 
 void setup() {
   stepper.setup();
   Serial.begin(9600);//Setup serial communication on TX/RX
   mySerial.begin(9600);
-  pinMode(2, OUTPUT);//Output on slaves
+  pinMode(SLAVEOUT, OUTPUT);//Output on slaves
   pinMode(3, INPUT);//Input from slave 1
   pinMode(8, INPUT);//Input from slave 2
+  servo.attach(A0);//servo signal pin
+  servo.write(160);//start at 160deg servo (open gripper)
   //Menu for serial interface
   Serial.println("CMD   Function");
   Serial.println("-------------------------------------------");
   Serial.println("R     Record position");
   Serial.println("P     Play recorded sequence");
   Serial.println("S     Stop");
+  Serial.println("Q     Servo close");
+  Serial.println("X     Servo open");    
   Serial.println();
 }
+
+//afspil: indlæs servopos array med 200 på hver plads, sig, if servopos<200 - apply stuff, else dont! - skal gøres efter motorerne har kørt!
 
 void master()//Code running on Master
 {
@@ -75,21 +87,57 @@ void master()//Code running on Master
   float error = 0;
   if(play ==1 && finalMove == 1)//If we are running the sequence and we are at our final move
   {
-    while(digitalRead(3)==LOW || digitalRead(8)==LOW);//Wait for the two slaves to complete their moves
-    while(stepper.getMotorState());//Wait for the master to complete its move
+    while(digitalRead(3)==LOW || digitalRead(8)==LOW)//Wait for the two slaves to complete their moves
+    {
+      uStepperServo::refresh(); 
+    }
+    while(stepper.getMotorState())//Wait for the master to complete its move
+    {
+      uStepperServo::refresh(); //keep sending signals to servo
+    }
+    if(servoPos[place] < 200)//if our array have a value in the "normal" range
+    {
+      servo.write(servoPos[place]);//write the value in the array
+      for(int i = 0; i <50; i++)//refresh servo a couple of times to ensure it is actuated
+      {
+        uStepperServo::refresh();
+        delay(5);
+      }
+    }
     cmd = 'S';//Send a stop command
     finalMove = 0;//We have done the final move
   }
   else if(play ==1 && place <= endmove)//If we are running the sequence but are not at the final move
   {
-    while(digitalRead(3)==LOW || digitalRead(8)==LOW);//Wait for the slaves to complete their moves
-    while(stepper.getMotorState());//Wait for the Master to complete its move
+    while(digitalRead(3)==LOW || digitalRead(8)==LOW)//Wait for the slaves to complete their moves
+    {
+      uStepperServo::refresh(); 
+    }
+    while(stepper.getMotorState())//Wait for the Master to complete its move
+    {
+      uStepperServo::refresh();//keep sending signals to servo
+    }  
+    if(servoPos[place] < 200)//if our array have a value in the "normal" range
+    {
+      servo.write(servoPos[place]);//write the value in the array
+      for(int i = 0; i <50; i++)//refresh servo a couple of times to ensure it is actuated
+      {
+        uStepperServo::refresh(); 
+        delay(5);
+      }
+    }  
     cmd = 'F';//Send F to run the next step in the sequence
   }
-  redo://A goto (yes it is ugly coding)
+  redo://A goto 
   if(play == 0)//If we are not running the sequence
   {
-    while(!Serial.available());//Wait for something to come on the serial line
+    while(!Serial.available())//Wait for something to come on the serial line
+    {
+      if(stopped == 0)
+      {
+        uStepperServo::refresh(); //refresh servo if we are not in stop without breaks
+      }
+    }
     cmd = Serial.read();//save it in the cmd variable
   }
   switch(cmd){//Switch according to received command
@@ -109,8 +157,13 @@ void master()//Code running on Master
     case 'R'://record steps
     if(record == 0)//If we were not recording before
     {
+      for(int i = 0; i<= 100; i++)
+      {
+        servoPos[i] = 200;
+      }
       stepper.encoder.setHome();//Set current position as home
       place = 0;//Reset the array counter
+      stopped = 0;
       record = 1;//Record flag
       stepper.softStop(SOFT);//Stop the stepper without breaks
       mySerial.println('R');//Send record command to Slaves
@@ -123,6 +176,7 @@ void master()//Code running on Master
       Serial.print(place);
       Serial.println(" recorded");
       pos[place] = (int16_t)stepper.encoder.getAngleMoved();//Save current position
+      servoPos[place] = servoAngle;//save servoposition
       place++;//Increment array counter
     }
       break;
@@ -178,6 +232,36 @@ void master()//Code running on Master
       }      
       break;
       
+    case 'X'://close gripper
+    if(record == 1)//if we are in recording state
+      {
+        if(servoAngle <= 140)//if we are less than max value-20
+        {
+          servoAngle = servoAngle+20;//increase in steps of 20
+          servo.write(servoAngle);
+        }
+        else
+        {
+          break;
+        }
+      }
+      break;
+
+    case 'Q'://open gripper
+    if(record == 1)//if we are in recording state
+      {
+        if(servoAngle >= 20)//if we are far enough from lower bound from lower bound
+        {
+          servoAngle = servoAngle-20;//decrease in steps of 20
+          servo.write(servoAngle);
+        }
+        else
+        {
+          break;
+        }
+      }
+      break;
+      
     default:
     
       break;
@@ -188,9 +272,9 @@ void slave()//Slave function - the functionality is pretty much the same as in t
 {
   while(stepper.getMotorState())//if stepper is running
   {
-    digitalWrite(2,LOW);//set pin 2 low
+    digitalWrite(SLAVEOUT,LOW);//set pin 2 low
   }
-  digitalWrite(2,HIGH);//if stepper is not running set pin 2 high
+  digitalWrite(SLAVEOUT,HIGH);//if stepper is not running set pin 2 high
   
   char cmd;
   float error = 0;
@@ -202,8 +286,8 @@ void slave()//Slave function - the functionality is pretty much the same as in t
       {
         stepper.encoder.setHome();
         place = 0;
-        record = 1;
         stepper.softStop(SOFT);
+        record = 1;  
       }
       else if(record == 1)
       {
@@ -218,7 +302,7 @@ void slave()//Slave function - the functionality is pretty much the same as in t
       {
         place = 0;
       }
-      digitalWrite(2,LOW);
+      digitalWrite(SLAVEOUT,LOW);
       error = ((int16_t)stepper.encoder.getAngleMoved()-pos[place]);
       if(error < 0)
       {
@@ -261,6 +345,6 @@ void slave()//Slave function - the functionality is pretty much the same as in t
 }
 
 void loop() {//comment in the appropriate function
-master();
+master(); 
 //slave();
 }
